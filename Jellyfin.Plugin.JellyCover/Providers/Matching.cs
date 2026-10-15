@@ -15,11 +15,14 @@ namespace Jellyfin.Plugin.JellyCover.Providers;
 /// </summary>
 internal static partial class Matching
 {
+    private const int PrefixMatchScore = 88;
+    private const int MinPrefixLength = 12;
+
     private static readonly string[] _leadingArticles = { "the ", "a ", "an " };
 
     /// <summary>
     /// Strips file-name noise from a lookup name before it is sent to search:
-    /// trailing "(2001)" years, "[tags]", "{tags}" and surrounding whitespace.
+    /// "(2001)" years, "(Series Book 3)" style parentheticals, "[tags]", "{tags}", Calibre's "_" for ":" and surrounding whitespace.
     /// </summary>
     /// <param name="name">The raw name.</param>
     /// <returns>The cleaned name.</returns>
@@ -27,24 +30,34 @@ internal static partial class Matching
     {
         var s = name.Trim();
         s = BracketedRegex().Replace(s, " ");
-        s = TrailingYearRegex().Replace(s, string.Empty);
+        s = ParentheticalRegex().Replace(s, " ");
+        s = s.Replace('_', ' ');
         s = MultiSpaceRegex().Replace(s, " ").Trim();
         return s.Length == 0 ? name.Trim() : s;
     }
 
     /// <summary>
-    /// Lower-cases, strips diacritics and punctuation, collapses whitespace and drops a leading article.
+    /// Lower-cases, strips diacritics and punctuation, collapses whitespace, unifies a few spellings
+    /// ("&amp;" / "and", "volume" / "vol") and drops a leading article.
     /// </summary>
     /// <param name="s">The text.</param>
     /// <returns>The normalised text.</returns>
-    public static string Normalize(string? s)
+    public static string Normalize(string? s) => Normalize(s, stripArticle: true);
+
+    /// <summary>
+    /// Lower-cases, strips diacritics and punctuation and collapses whitespace.
+    /// </summary>
+    /// <param name="s">The text.</param>
+    /// <param name="stripArticle">Whether a leading "the" / "a" / "an" is dropped (not wanted for person names).</param>
+    /// <returns>The normalised text.</returns>
+    public static string Normalize(string? s, bool stripArticle)
     {
         if (string.IsNullOrWhiteSpace(s))
         {
             return string.Empty;
         }
 
-        var decomposed = s.Normalize(NormalizationForm.FormD);
+        var decomposed = s.Replace("&", " and ", StringComparison.Ordinal).Normalize(NormalizationForm.FormD);
         var sb = new StringBuilder(decomposed.Length);
         foreach (var ch in decomposed)
         {
@@ -65,12 +78,16 @@ internal static partial class Matching
         }
 
         var result = MultiSpaceRegex().Replace(sb.ToString(), " ").Trim();
-        foreach (var article in _leadingArticles)
+        result = VolumeRegex().Replace(result, "vol");
+        if (stripArticle)
         {
-            if (result.StartsWith(article, StringComparison.Ordinal) && result.Length > article.Length)
+            foreach (var article in _leadingArticles)
             {
-                result = result.Substring(article.Length);
-                break;
+                if (result.StartsWith(article, StringComparison.Ordinal) && result.Length > article.Length)
+                {
+                    result = result.Substring(article.Length);
+                    break;
+                }
             }
         }
 
@@ -97,23 +114,73 @@ internal static partial class Matching
             return 100;
         }
 
+        var score = 0;
         var ta = na.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
         var tb = nb.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
         var intersection = ta.Intersect(tb, StringComparer.Ordinal).Count();
-        if (intersection == 0)
+        if (intersection > 0)
+        {
+            if (ta.IsSubsetOf(tb) || tb.IsSubsetOf(ta))
+            {
+                // one title fully contained in the other (e.g. "Dune" vs "Dune Messiah", or title vs title+subtitle)
+                var ratio = (double)Math.Min(ta.Count, tb.Count) / Math.Max(ta.Count, tb.Count);
+                score = (int)Math.Round(70 + (25 * ratio));
+            }
+            else
+            {
+                var union = ta.Union(tb, StringComparer.Ordinal).Count();
+                score = (int)Math.Round(85.0 * intersection / union);
+            }
+        }
+
+        // truncated file names ("Hellboy Volume 1: Seed of Destr" vs the full title)
+        if (Math.Min(na.Length, nb.Length) >= MinPrefixLength
+            && (na.StartsWith(nb, StringComparison.Ordinal) || nb.StartsWith(na, StringComparison.Ordinal)))
+        {
+            score = Math.Max(score, PrefixMatchScore);
+        }
+
+        return score;
+    }
+
+    /// <summary>
+    /// How well a hit's authors agree with the authors we expect: +15 for a full-name match, +10 for a surname match,
+    /// -20 when both sides are known and nothing matches, 0 when either side is unknown.
+    /// </summary>
+    /// <param name="hitAuthors">Author names on the search hit.</param>
+    /// <param name="wanted">Author names we expect (from the OPF / file name).</param>
+    /// <returns>The score adjustment.</returns>
+    public static int AuthorAffinity(IList<string> hitAuthors, IReadOnlyList<string>? wanted)
+    {
+        if (wanted is null || wanted.Count == 0 || hitAuthors.Count == 0)
         {
             return 0;
         }
 
-        // one title fully contained in the other (e.g. "Dune" vs "Dune Messiah", or title vs title+subtitle)
-        if (ta.IsSubsetOf(tb) || tb.IsSubsetOf(ta))
+        var hits = hitAuthors.Select(h => Normalize(h, stripArticle: false)).Where(h => h.Length > 0).ToList();
+        var best = 0;
+        foreach (var w in wanted)
         {
-            var ratio = (double)Math.Min(ta.Count, tb.Count) / Math.Max(ta.Count, tb.Count);
-            return (int)Math.Round(70 + (25 * ratio));
+            var nw = Normalize(w, stripArticle: false);
+            if (nw.Length == 0)
+            {
+                continue;
+            }
+
+            if (hits.Contains(nw, StringComparer.Ordinal))
+            {
+                return 15;
+            }
+
+            var surname = nw.Split(' ', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+            if (surname is not null && surname.Length >= 3
+                && hits.Any(h => h.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(surname, StringComparer.Ordinal)))
+            {
+                best = 10;
+            }
         }
 
-        var union = ta.Union(tb, StringComparer.Ordinal).Count();
-        return (int)Math.Round(85.0 * intersection / union);
+        return best > 0 ? best : -20;
     }
 
     /// <summary>
@@ -122,8 +189,9 @@ internal static partial class Matching
     /// <param name="query">The cleaned query title.</param>
     /// <param name="hit">The hit.</param>
     /// <param name="info">The lookup info (year / series are used as tie breakers).</param>
+    /// <param name="authors">Expected authors, if known.</param>
     /// <returns>The score.</returns>
-    public static int Score(string query, HardcoverBookSearchHit hit, ItemLookupInfo info)
+    public static int Score(string query, HardcoverBookSearchHit hit, ItemLookupInfo info, IReadOnlyList<string>? authors = null)
     {
         var score = TitleSimilarity(query, hit.Title);
         if (!string.IsNullOrWhiteSpace(hit.Subtitle))
@@ -149,6 +217,7 @@ internal static partial class Matching
             score += 10;
         }
 
+        score += AuthorAffinity(hit.AuthorNames, authors);
         return score;
     }
 
@@ -159,15 +228,16 @@ internal static partial class Matching
     /// <param name="hits">The hits in relevance order.</param>
     /// <param name="info">The lookup info.</param>
     /// <param name="minimumScore">Minimum acceptable score.</param>
+    /// <param name="authors">Expected authors, if known.</param>
     /// <returns>The best hit and its score.</returns>
-    public static (HardcoverBookSearchHit? Hit, int Score) Best(string query, IReadOnlyList<HardcoverBookSearchHit> hits, ItemLookupInfo info, int minimumScore)
+    public static (HardcoverBookSearchHit? Hit, int Score) Best(string query, IReadOnlyList<HardcoverBookSearchHit> hits, ItemLookupInfo info, int minimumScore, IReadOnlyList<string>? authors = null)
     {
         HardcoverBookSearchHit? best = null;
         var bestScore = int.MinValue;
         for (var i = 0; i < hits.Count; i++)
         {
             // small relevance bonus so ties go to Hardcover's own ranking
-            var s = Score(query, hits[i], info) - i;
+            var s = Score(query, hits[i], info, authors) - i;
             if (s > bestScore)
             {
                 best = hits[i];
@@ -254,9 +324,12 @@ internal static partial class Matching
     [GeneratedRegex(@"[\[\{][^\]\}]*[\]\}]")]
     private static partial Regex BracketedRegex();
 
-    [GeneratedRegex(@"\s*\((?:19|20)\d{2}\)\s*$")]
-    private static partial Regex TrailingYearRegex();
+    [GeneratedRegex(@"\s*\([^()]*\)")]
+    private static partial Regex ParentheticalRegex();
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex MultiSpaceRegex();
+
+    [GeneratedRegex(@"\bvolume\b")]
+    private static partial Regex VolumeRegex();
 }

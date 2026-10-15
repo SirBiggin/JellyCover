@@ -130,6 +130,10 @@ public class JellyCoverPersonProvider : IRemoteMetadataProvider<Person, PersonLo
             result.Provider = Name;
             result.QueriedById = JellyCoverBookProvider.GetHardcoverId(info.ProviderIds) is not null;
         }
+        catch (HardcoverUnavailableException ex)
+        {
+            _logger.LogDebug("Hardcover unavailable, leaving author \"{Name}\" untouched: {Reason}", info.Name, ex.Message);
+        }
         catch (OperationCanceledException)
         {
             throw;

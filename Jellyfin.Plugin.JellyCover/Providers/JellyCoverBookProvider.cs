@@ -53,47 +53,51 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
             return results;
         }
 
-        // Identify dialog with an explicit Hardcover id typed in
-        var explicitId = GetHardcoverId(searchInfo.ProviderIds);
-        if (explicitId is not null)
+        try
         {
-            var book = await _client.GetBookAsync(explicitId.Value, cancellationToken).ConfigureAwait(false);
-            if (book is not null)
+            // Identify dialog with an explicit Hardcover id typed in
+            var explicitId = GetHardcoverId(searchInfo.ProviderIds);
+            if (explicitId is not null)
             {
-                results.Add(ToSearchResult(book));
-                return results;
+                var book = await _client.GetBookAsync(explicitId.Value, cancellationToken).ConfigureAwait(false);
+                if (book is not null)
+                {
+                    results.Add(ToSearchResult(book));
+                    return results;
+                }
             }
-        }
 
-        var isbn = GetIsbn(searchInfo.ProviderIds);
-        if (isbn is not null)
-        {
-            var id = await _client.FindBookIdByIsbnAsync(isbn, cancellationToken).ConfigureAwait(false);
-            if (id is not null)
+            var hints = LookupHints.Collect(searchInfo.Path, searchInfo.Name, Config.ReadSidecarMetadata, _logger);
+            var exactId = await ResolveByIdentifiersAsync(_client, _logger, searchInfo, hints, cancellationToken).ConfigureAwait(false);
+            if (exactId is not null)
             {
-                var book = await _client.GetBookAsync(id.Value, cancellationToken).ConfigureAwait(false);
+                var book = await _client.GetBookAsync(exactId.Value, cancellationToken).ConfigureAwait(false);
                 if (book is not null)
                 {
                     results.Add(ToSearchResult(book));
                 }
             }
-        }
 
-        if (string.IsNullOrWhiteSpace(searchInfo.Name))
-        {
-            return results;
-        }
-
-        var query = Matching.CleanForSearch(searchInfo.Name);
-        var hits = await _client.SearchBooksAsync(query, SearchResultLimit, cancellationToken).ConfigureAwait(false);
-        foreach (var hit in hits)
-        {
-            if (results.Any(r => string.Equals(r.GetProviderId(Plugin.ProviderIdKey), hit.Id.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)))
+            if (string.IsNullOrWhiteSpace(searchInfo.Name))
             {
-                continue;
+                return results;
             }
 
-            results.Add(ToSearchResult(hit));
+            var query = Matching.CleanForSearch(searchInfo.Name);
+            var hits = await _client.SearchBooksAsync(query, SearchResultLimit, cancellationToken).ConfigureAwait(false);
+            foreach (var hit in hits)
+            {
+                if (results.Any(r => string.Equals(r.GetProviderId(Plugin.ProviderIdKey), hit.Id.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                results.Add(ToSearchResult(hit));
+            }
+        }
+        catch (HardcoverUnavailableException ex)
+        {
+            _logger.LogWarning("Hardcover unavailable, no search results for \"{Name}\": {Reason}", searchInfo.Name, ex.Message);
         }
 
         return results;
@@ -105,6 +109,12 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
         var result = new MetadataResult<Book>();
         if (!_client.IsConfigured)
         {
+            return result;
+        }
+
+        if (_client.IsPaused)
+        {
+            _logger.LogDebug("Hardcover rate limit pause in effect, leaving \"{Name}\" for a later refresh", info.Name);
             return result;
         }
 
@@ -120,38 +130,50 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
                 queriedById = book is not null;
                 if (book is null)
                 {
-                    _logger.LogWarning("Hardcover id {Id} on \"{Name}\" did not resolve, falling back to lookup", id, info.Name);
+                    _logger.LogWarning("Hardcover id {Id} on \"{Name}\" does not exist (merged or deleted?), falling back to lookup", id, info.Name);
                 }
+            }
+
+            var hints = LookupHints.Collect(info.Path, info.Name, Config.ReadSidecarMetadata, _logger);
+            if (hints.HasAny)
+            {
+                _logger.LogDebug(
+                    "Lookup hints for \"{Name}\" from {Source}: title=\"{Title}\" authors={Authors} isbn={Isbn} asin={Asin}",
+                    info.Name,
+                    hints.Source,
+                    hints.Title,
+                    string.Join("; ", hints.Authors),
+                    hints.Isbn,
+                    hints.Asin);
             }
 
             if (book is null)
             {
-                var isbn = GetIsbn(info.ProviderIds);
-                if (isbn is not null)
+                var exactId = await ResolveByIdentifiersAsync(_client, _logger, info, hints, cancellationToken).ConfigureAwait(false);
+                if (exactId is not null)
                 {
-                    var isbnId = await _client.FindBookIdByIsbnAsync(isbn, cancellationToken).ConfigureAwait(false);
-                    if (isbnId is not null)
-                    {
-                        book = await _client.GetBookAsync(isbnId.Value, cancellationToken).ConfigureAwait(false);
-                        queriedById = book is not null;
-                        _logger.LogDebug("Resolved ISBN {Isbn} on \"{Name}\" to Hardcover book {Id}", isbn, info.Name, isbnId);
-                    }
+                    book = await _client.GetBookAsync(exactId.Value, cancellationToken).ConfigureAwait(false);
+                    queriedById = book is not null;
                 }
             }
 
-            if (book is null && Config.AllowTitleSearchFallback && !string.IsNullOrWhiteSpace(info.Name))
+            if (book is null && Config.AllowTitleSearchFallback)
             {
-                var query = Matching.CleanForSearch(info.Name);
-                var hits = await _client.SearchBooksAsync(query, SearchResultLimit, cancellationToken).ConfigureAwait(false);
-                var (best, score) = Matching.Best(query, hits, info, Math.Clamp(Config.MinimumMatchScore, 0, 100));
-                if (best is null)
+                var query = Matching.CleanForSearch(hints.Title ?? info.Name ?? string.Empty);
+                if (query.Length > 0)
                 {
-                    _logger.LogInformation("No Hardcover match for \"{Name}\" (best score {Score}, {Count} hits)", info.Name, score, hits.Count);
-                    return result;
-                }
+                    var authors = hints.Authors.Count > 0 ? (IReadOnlyList<string>)hints.Authors.ToList() : null;
+                    var hits = await _client.SearchBooksAsync(query, SearchResultLimit, cancellationToken).ConfigureAwait(false);
+                    var (best, score) = Matching.Best(query, hits, info, Math.Clamp(Config.MinimumMatchScore, 0, 100), authors);
+                    if (best is null)
+                    {
+                        _logger.LogInformation("No Hardcover match for \"{Name}\" (query \"{Query}\", best score {Score}, {Count} hits)", info.Name, query, score, hits.Count);
+                        return result;
+                    }
 
-                _logger.LogInformation("Matched \"{Name}\" to Hardcover book {Id} \"{Title}\" (score {Score})", info.Name, best.Id, best.Title, score);
-                book = await _client.GetBookAsync(best.Id, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation("Matched \"{Name}\" to Hardcover book {Id} \"{Title}\" (query \"{Query}\", score {Score})", info.Name, best.Id, best.Title, query, score);
+                    book = await _client.GetBookAsync(best.Id, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             if (book is null)
@@ -159,11 +181,16 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
                 return result;
             }
 
-            result.Item = MapBook(book, info);
+            result.Item = MapBook(book, info, hints);
             result.People = MapPeople(book);
             result.HasMetadata = true;
             result.QueriedById = queriedById;
             result.Provider = Name;
+        }
+        catch (HardcoverUnavailableException ex)
+        {
+            // nothing is written, Jellyfin keeps whatever the item already has and retries on a later refresh
+            _logger.LogDebug("Hardcover unavailable, leaving \"{Name}\" untouched: {Reason}", info.Name, ex.Message);
         }
         catch (OperationCanceledException)
         {
@@ -212,6 +239,65 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
     /// <param name="providerIds">The provider ids.</param>
     /// <returns>The ISBN, or null.</returns>
     internal static string? GetIsbn(IReadOnlyDictionary<string, string>? providerIds)
+        => GetProviderValue(providerIds, "ISBN");
+
+    /// <summary>
+    /// Reads an ASIN from a provider id dictionary (stored under "Amazon").
+    /// </summary>
+    /// <param name="providerIds">The provider ids.</param>
+    /// <returns>The ASIN, or null.</returns>
+    internal static string? GetAsin(IReadOnlyDictionary<string, string>? providerIds)
+        => LookupHints.CleanAsin(GetProviderValue(providerIds, "Amazon"));
+
+    /// <summary>
+    /// Resolves a Hardcover book id from exact identifiers: an ISBN (item provider id, then sidecar), then an ASIN.
+    /// Costs one request per identifier tried.
+    /// </summary>
+    /// <param name="client">The Hardcover client.</param>
+    /// <param name="logger">The logger.</param>
+    /// <param name="info">The lookup info.</param>
+    /// <param name="hints">Sidecar hints.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The book id, or null.</returns>
+    internal static async Task<int?> ResolveByIdentifiersAsync(HardcoverClient client, ILogger logger, ItemLookupInfo info, LookupHints hints, CancellationToken cancellationToken)
+    {
+        var isbns = new List<string>();
+        var fromItem = LookupHints.CleanIsbn(GetIsbn(info.ProviderIds));
+        if (fromItem is not null)
+        {
+            isbns.Add(fromItem);
+        }
+
+        if (hints.Isbn is not null && !isbns.Contains(hints.Isbn, StringComparer.Ordinal))
+        {
+            isbns.Add(hints.Isbn);
+        }
+
+        foreach (var isbn in isbns)
+        {
+            var id = await client.FindBookIdByIsbnAsync(isbn, cancellationToken).ConfigureAwait(false);
+            if (id is not null)
+            {
+                logger.LogDebug("Resolved ISBN {Isbn} on \"{Name}\" to Hardcover book {Id}", isbn, info.Name, id);
+                return id;
+            }
+        }
+
+        var asin = hints.Asin ?? GetAsin(info.ProviderIds);
+        if (asin is not null)
+        {
+            var id = await client.FindBookIdByAsinAsync(asin, cancellationToken).ConfigureAwait(false);
+            if (id is not null)
+            {
+                logger.LogDebug("Resolved ASIN {Asin} on \"{Name}\" to Hardcover book {Id}", asin, info.Name, id);
+                return id;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? GetProviderValue(IReadOnlyDictionary<string, string>? providerIds, string key)
     {
         if (providerIds is null)
         {
@@ -220,7 +306,7 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
 
         foreach (var kv in providerIds)
         {
-            if (string.Equals(kv.Key, "ISBN", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kv.Value))
+            if (string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kv.Value))
             {
                 return kv.Value.Trim();
             }
@@ -283,7 +369,7 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
         return header.Length == 0 ? description : header + "\n\n" + description;
     }
 
-    private static Book MapBook(HardcoverBook src, BookInfo info)
+    private static Book MapBook(HardcoverBook src, BookInfo info, LookupHints hints)
     {
         var config = Config;
         var title = string.IsNullOrWhiteSpace(src.Title) ? info.Name : src.Title.Trim();
@@ -360,6 +446,11 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
         {
             book.SeriesName = info.SeriesName;
         }
+        else if (hints.SeriesName is not null)
+        {
+            book.SeriesName = hints.SeriesName;
+            book.IndexNumber = hints.SeriesIndex;
+        }
 
         if (config.ImportPublisher && !string.IsNullOrWhiteSpace(src.Publisher))
         {
@@ -372,16 +463,16 @@ public class JellyCoverBookProvider : IRemoteMetadataProvider<Book, BookInfo>, I
         }
 
         book.SetProviderId(Plugin.ProviderIdKey, src.Id.ToString(CultureInfo.InvariantCulture));
-        var existingIsbn = GetIsbn(info.ProviderIds);
-        var isbn = existingIsbn ?? src.Isbn13 ?? src.Isbn10;
+        var isbn = GetIsbn(info.ProviderIds) ?? hints.Isbn ?? src.Isbn13 ?? src.Isbn10;
         if (!string.IsNullOrWhiteSpace(isbn))
         {
             book.SetProviderId("ISBN", isbn);
         }
 
-        if (!string.IsNullOrWhiteSpace(src.Asin))
+        var asin = src.Asin ?? hints.Asin;
+        if (!string.IsNullOrWhiteSpace(asin))
         {
-            book.SetProviderId("Amazon", src.Asin);
+            book.SetProviderId("Amazon", asin);
         }
 
         return book;

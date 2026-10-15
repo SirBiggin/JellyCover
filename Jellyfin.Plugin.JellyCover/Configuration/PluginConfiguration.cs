@@ -82,6 +82,12 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool AllowTitleSearchFallback { get; set; } = true;
 
     /// <summary>
+    /// Gets or sets a value indicating whether a <c>metadata.opf</c> sidecar next to the book file (Calibre writes one
+    /// for every book) is read for the exact title, authors, ISBN, ASIN and series before searching Hardcover.
+    /// </summary>
+    public bool ReadSidecarMetadata { get; set; } = true;
+
+    /// <summary>
     /// Gets or sets the minimum title similarity (0-100) a search hit needs before it is accepted automatically.
     /// </summary>
     public int MinimumMatchScore { get; set; } = 60;

@@ -72,6 +72,10 @@ public class JellyCoverPersonImageProvider : IRemoteImageProvider, IHasOrder
                 Height = author.Image.Height
             });
         }
+        catch (HardcoverUnavailableException ex)
+        {
+            _logger.LogDebug("Hardcover unavailable, no photo for \"{Name}\" right now: {Reason}", item.Name, ex.Message);
+        }
         catch (OperationCanceledException)
         {
             throw;

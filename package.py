@@ -35,7 +35,7 @@ a = ap.parse_args()
 
 proj = root / "Jellyfin.Plugin.JellyCover" / "Jellyfin.Plugin.JellyCover.csproj"
 if not a.skip_build:
-    dotnet = a.dotnet if pathlib.Path(a.dotnet).exists() else "dotnet"
+    dotnet = next((c for c in (a.dotnet, a.dotnet + ".exe") if pathlib.Path(c).exists()), "dotnet")
     subprocess.run([dotnet, "build", str(proj), "-c", "Release", f"-p:Version={a.version}",
                     f"-p:AssemblyVersion={a.version}", f"-p:FileVersion={a.version}"], check=True)
 

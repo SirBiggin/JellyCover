@@ -3,9 +3,9 @@
 
 Usage (token is never written anywhere):
   set HARDCOVER_TOKEN=...   (or $env:HARDCOVER_TOKEN / export)
-  python tools/validate_api.py [search title] [isbn]
+  python tools/validate_api.py [search title] [isbn] [asin]
 
-Checks: search (Book + Author), book by id, covers, isbn -> book id, author by id.
+Checks: search (Book + Author), book by id, covers, isbn -> book id, asin -> book id, author by id.
 Exits non-zero if any query returns GraphQL errors, so field-name drift in the beta API shows up immediately.
 """
 import json
@@ -79,6 +79,11 @@ if d:
     print("  editions:", d["editions"])
     if d["editions"] and not book_id:
         book_id = d["editions"][0]["book_id"]
+
+asin = sys.argv[3] if len(sys.argv) > 3 else "B00A820Y6U"  # Hellboy Vol. 1 (Kindle)
+d = run("BookIdByAsinQuery", {"asin": asin})
+if d:
+    print("  editions:", d["editions"])
 
 author_id = None
 if book_id:

@@ -76,27 +76,42 @@ Hardcover.app metadata provider for Jellyfin book libraries. Same idea as the of
 | Import publisher | on | Stored as a studio |
 | Import contributors | on | Authors, illustrators, translators, narrators, editors, cover artists… |
 | Append subtitle to the title | off | `Title: Subtitle` |
-| Match by title search | on | Off = only Hardcover id / ISBN matches during scans |
+| Read metadata.opf next to the book file | on | Exact title / author / ISBN / ASIN / series from Calibre's sidecar |
+| Match by title search | on | Off = only Hardcover id / ISBN / ASIN matches during scans |
 | Minimum title match score | 60 | 0–100; 100 = exact title only |
 | Fetch author biographies / photos | on / on | Exact name matches only |
 
 ## How matching works
 
+0. If a `metadata.opf` sits next to the book file (Calibre writes one for every book; a `<file>.opf` works too),
+   its exact title, authors, ISBN, ASIN and series are read first. Without one, a Calibre folder layout
+   (`Author/Title (id)/Title - Author.epub`) or a plain `Title - Author` file name still yields the title and author.
+   Jellyfin itself often names the item after the truncated file name, so this is what turns
+   `Hellboy Volume 1_ Seed of Destr - Mike Mignola` into a match.
 1. A **Hardcover id** on the item (set by Identify, or an earlier match) → fetched directly.
-2. Otherwise an **ISBN** on the item (the Bookshelf plugin's OPF reader stores `ISBN`) → resolved via Hardcover's editions.
-3. Otherwise a **title search**. File-name noise such as `(2001)` and `[tags]` is stripped first. The best hit
-   is accepted only if its title similarity (plus year / series bonuses) reaches **Minimum match score**.
-   Below that the book is left untouched rather than guessed.
+2. Otherwise an **ISBN** (item provider id or OPF) → resolved via Hardcover's editions, then an **ASIN** the same way.
+3. Otherwise a **title search** with the OPF title (or the cleaned item name: `(2001)`, `(Series Book 3)` and
+   `[tags]` are stripped). Hits are scored on title similarity, with bonuses for the year, the series and the
+   author (+15 full name, +10 surname, −20 when the authors clearly differ) and credit for a truncated title that
+   is a prefix of the real one. The best hit is accepted only if it reaches **Minimum match score**; below that
+   the book is left untouched rather than guessed.
 
 Hardcover's search is Typesense-backed and returns relevance-sorted hits; ties go to Hardcover's ranking.
 
 ## Rate limits
 
 Hardcover's free plan allows a burst of 10 requests, 60 per minute and 5,000 per day. The plugin throttles
-itself (token bucket of 8, refilling 1/s) and honours `Retry-After` once on a 429. A full scan uses roughly
-two requests per book (search + details) and one more per cover fetch, so a very large first scan can hit
-the daily cap; later scans only touch new or refreshed items. Errors are logged under
-`Jellyfin.Plugin.JellyCover`, never thrown into the scan.
+itself (token bucket of 8, refilling 1/s) and honours a short `Retry-After` once on a 429. A full pass uses
+roughly two requests per book (search + details), one more per cover fetch and two per author, so a library of
+a couple of thousand books cannot be matched in one day. When the daily cap is hit Hardcover answers 429 with a
+`Retry-After` of several hours; the plugin then **pauses every request until that time**, logs one warning
+(plus a reminder every 10 minutes while a scan keeps asking), and leaves the remaining items untouched so the next
+scan or "Refresh metadata → Search for missing metadata" picks them up. It never falls back to a title search
+because an id lookup failed on a 429. **Test connection** clears the pause so a fresh token can be tried at once.
+
+Note that a plain library scan only runs remote providers for new items; "Replace all metadata" re-queries
+every book and will burn through the cap on a large library. Errors are logged under `Jellyfin.Plugin.JellyCover`,
+never thrown into the scan.
 
 ## Build
 
@@ -127,6 +142,22 @@ Then merge `dist/manifest-entry.json` into the plugin repository's `manifest.jso
 - Images on Hardcover are user-uploaded. For a private home server that is fine; see Hardcover's
   [public data warning](https://docs.hardcover.app/api/getting-started/#public-data-warning) before exposing them publicly.
 - Not affiliated with Hardcover or the Jellyfin project.
+
+## Changelog
+
+**1.0.1.0**
+
+- Daily-limit 429s now pause every request until Hardcover's `Retry-After` expires, with one warning instead of
+  hundreds of log lines. Items hit by the pause are left untouched for a later refresh.
+- An id lookup that fails because the API is unavailable no longer falls back to a title search.
+- `metadata.opf` sidecars (Calibre) are read for the exact title, authors, ISBN, ASIN and series; Calibre folder
+  layouts and `Title - Author` file names are understood without one.
+- Books can be resolved by ASIN. Search hits are scored with the author, and truncated titles get prefix credit.
+- "No Hardcover match" log lines now include the query that was sent.
+
+**1.0.0.0**
+
+- Initial release.
 
 ## License
 

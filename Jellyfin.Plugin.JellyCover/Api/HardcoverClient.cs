@@ -15,7 +15,9 @@ namespace Jellyfin.Plugin.JellyCover.Api;
 
 /// <summary>
 /// Thin GraphQL client for the Hardcover.app API (https://api.hardcover.app/v1/graphql).
-/// Every public method returns an empty / null result on failure and logs the reason; callers never throw.
+/// Every public method returns an empty / null result on a definite miss (not found, bad token, bad query) and logs the reason.
+/// Transient failures (rate limit in effect, 5xx, timeout, network) throw <see cref="HardcoverUnavailableException"/> so
+/// callers can leave the item untouched instead of falling back to a weaker lookup.
 /// </summary>
 public sealed class HardcoverClient
 {
@@ -82,6 +84,13 @@ query JellyCoverIsbn($isbn: String!) {
   }
 }";
 
+    private const string BookIdByAsinQuery = @"
+query JellyCoverAsin($asin: String!) {
+  editions(where: {asin: {_eq: $asin}}, order_by: {users_count: desc}, limit: 1) {
+    book_id
+  }
+}";
+
     private const string AuthorByIdQuery = @"
 query JellyCoverAuthor($id: Int!) {
   authors(where: {id: {_eq: $id}}, limit: 1) {
@@ -121,6 +130,11 @@ query JellyCoverAuthor($id: Int!) {
     /// Gets a value indicating whether an API token has been configured.
     /// </summary>
     public bool IsConfigured => !string.IsNullOrWhiteSpace(ConfiguredToken);
+
+    /// <summary>
+    /// Gets a value indicating whether requests are currently being skipped because Hardcover's rate limit was exceeded.
+    /// </summary>
+    public bool IsPaused => HardcoverRateLimitHandler.PausedUntil is not null;
 
     private static string? ConfiguredToken => NormalizeToken(Plugin.Instance?.Configuration.ApiToken);
 
@@ -295,6 +309,38 @@ query JellyCoverAuthor($id: Int!) {
     }
 
     /// <summary>
+    /// Resolves an Amazon ASIN (e.g. from a Calibre OPF's MOBI-ASIN identifier) to a Hardcover book id via its editions.
+    /// </summary>
+    /// <param name="asin">The ASIN.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The book id, or null.</returns>
+    public async Task<int?> FindBookIdByAsinAsync(string asin, CancellationToken cancellationToken)
+    {
+        var clean = asin.Trim().ToUpperInvariant();
+        if (clean.Length != 10)
+        {
+            return null;
+        }
+
+        using var doc = await ExecuteAsync(BookIdByAsinQuery, new { asin = clean }, null, cancellationToken).ConfigureAwait(false);
+        if (doc is null || !TryGetData(doc.RootElement, "editions", out var editions) || editions.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var edition in editions.EnumerateArray())
+        {
+            var bookId = GetInt(edition, "book_id");
+            if (bookId is not null)
+            {
+                return bookId;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Fetches full book details.
     /// </summary>
     /// <param name="id">Hardcover book id.</param>
@@ -426,6 +472,8 @@ query JellyCoverAuthor($id: Int!) {
 
         try
         {
+            // a manual test should always reach the API; if the limit is still exceeded the real 429 re-pauses
+            HardcoverRateLimitHandler.ClearPause();
             var client = _httpClientFactory.CreateClient(HttpClientName);
             using var request = BuildRequest(SearchBooksQuery, new { q = "dune", perPage = 1, page = 1 }, token);
             using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -492,19 +540,38 @@ query JellyCoverAuthor($id: Int!) {
 
             if (!response.IsSuccessStatusCode)
             {
-                if (response.StatusCode == HttpStatusCode.Unauthorized)
+                var detail = DescribeErrorBody(body);
+                if (detail.Length == 0)
                 {
-                    _logger.LogError("Hardcover rejected the API token (401). Check it in Dashboard > Plugins > JellyCover. {Detail}", DescribeErrorBody(body));
-                }
-                else if (response.StatusCode == HttpStatusCode.Forbidden)
-                {
-                    _logger.LogError("Hardcover refused the request (403). The token probably lacks the read:catalog scope. {Detail}", DescribeErrorBody(body));
-                }
-                else
-                {
-                    _logger.LogWarning("Hardcover request failed with HTTP {Status}: {Detail}", (int)response.StatusCode, DescribeErrorBody(body));
+                    detail = response.ReasonPhrase ?? string.Empty;
                 }
 
+                if (response.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    _logger.LogError("Hardcover rejected the API token (401). Check it in Dashboard > Plugins > JellyCover. {Detail}", detail);
+                    return null;
+                }
+
+                if (response.StatusCode == HttpStatusCode.Forbidden)
+                {
+                    _logger.LogError("Hardcover refused the request (403). The token probably lacks the read:catalog scope. {Detail}", detail);
+                    return null;
+                }
+
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    // the rate-limit handler has already logged the pause (once); keep per-item noise at debug
+                    _logger.LogDebug("Hardcover request skipped by the rate limit: {Detail}", detail);
+                    throw new HardcoverUnavailableException("Hardcover rate limit: " + detail);
+                }
+
+                if ((int)response.StatusCode >= 500)
+                {
+                    _logger.LogWarning("Hardcover is unavailable (HTTP {Status}): {Detail}", (int)response.StatusCode, detail);
+                    throw new HardcoverUnavailableException(string.Format(CultureInfo.InvariantCulture, "Hardcover HTTP {0}: {1}", (int)response.StatusCode, detail));
+                }
+
+                _logger.LogWarning("Hardcover request failed with HTTP {Status}: {Detail}", (int)response.StatusCode, detail);
                 return null;
             }
 
@@ -522,14 +589,23 @@ query JellyCoverAuthor($id: Int!) {
 
             return doc;
         }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (HardcoverUnavailableException)
+        {
+            throw;
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Hardcover request timed out");
-            return null;
+            throw new HardcoverUnavailableException("Hardcover request timed out", ex);
         }
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "Hardcover could not be reached");
+            throw new HardcoverUnavailableException("Hardcover could not be reached: " + ex.Message, ex);
         }
         catch (Exception ex)
         {

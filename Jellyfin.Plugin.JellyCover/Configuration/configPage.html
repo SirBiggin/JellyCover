@@ -121,6 +121,16 @@
                                 Turn this off to only ever use exact matches during scans.
                             </div>
                         </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ReadSidecarMetadata" />
+                                <span>Read metadata.opf next to the book file</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Calibre writes one for every book. It gives the exact title, author, ISBN and ASIN, which beats the truncated
+                                "Title - Author" file names Jellyfin otherwise searches with. The author is also used to score search hits.
+                            </div>
+                        </div>
                         <div class="inputContainer">
                             <input is="emby-input" type="number" id="MinimumMatchScore" label="Minimum title match score (0–100)" min="0" max="100" step="1" />
                             <div class="fieldDescription">A search hit below this score is ignored instead of guessed. 100 = exact title only, 60 is a sensible default.</div>
@@ -157,7 +167,7 @@
                 var pluginId = '9be8d848-e1ba-4129-89af-3bf0def71e9c';
                 var checkboxes = ['FetchBookCovers', 'ImportGenres', 'ImportMoodsAsTags', 'ImportContentWarningsAsTags',
                     'ImportCommunityRating', 'ImportSeries', 'ImportPublisher', 'ImportContributors', 'IncludeSubtitleInTitle',
-                    'AllowTitleSearchFallback', 'FetchAuthorMetadata', 'FetchAuthorImages'];
+                    'AllowTitleSearchFallback', 'ReadSidecarMetadata', 'FetchAuthorMetadata', 'FetchAuthorImages'];
                 var numbers = ['MaxGenres', 'MinimumMatchScore'];
 
                 function el(id) { return document.getElementById(id); }
