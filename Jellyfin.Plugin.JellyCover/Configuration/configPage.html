@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JellyCover</title>
+</head>
+<body>
+    <div id="JellyCoverConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="JellyCoverConfigForm">
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <div class="sectionTitleContainer flex align-items-center">
+                            <h2 class="sectionTitle">JellyCover · Hardcover.app metadata</h2>
+                        </div>
+                        <p>
+                            Fetches book metadata and covers from <a is="emby-linkbutton" class="button-link" href="https://hardcover.app" target="_blank" rel="noopener">Hardcover.app</a>,
+                            plus author biographies and photos. Enable <strong>Hardcover</strong> as a metadata downloader and image fetcher
+                            in your Book library settings after saving a token here.
+                        </p>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3 class="sectionTitle">API token</h3>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="password" id="ApiToken" label="Hardcover API token" autocomplete="off" spellcheck="false" />
+                            <div class="fieldDescription">
+                                Create a personal access token at
+                                <a is="emby-linkbutton" class="button-link" href="https://hardcover.app/account/api/keys/new?scope=read:catalog" target="_blank" rel="noopener">hardcover.app/account/api/keys/new</a>
+                                with the <code>read:catalog</code> scope (that link pre-selects it). Pick a long expiration; the plugin stops working when the token expires.
+                                Pasting the value with a leading "Bearer " is fine.
+                            </div>
+                        </div>
+                        <div class="checkboxContainer">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ShowToken" />
+                                <span>Show token</span>
+                            </label>
+                        </div>
+                        <div style="margin: .5em 0 1em 0;">
+                            <button is="emby-button" type="button" id="TestButton" class="raised button-alt">
+                                <span>Test connection</span>
+                            </button>
+                            <span id="TestResult" style="margin-left: 1em;"></span>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3 class="sectionTitle">Books</h3>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="FetchBookCovers" />
+                                <span>Offer cover images</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">The book's cover plus the covers of its most popular editions.</div>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportGenres" />
+                                <span>Import genres</span>
+                            </label>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="MaxGenres" label="Maximum genres per book" min="0" max="50" step="1" />
+                            <div class="fieldDescription">0 = no limit.</div>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportMoodsAsTags" />
+                                <span>Import moods as tags</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportContentWarningsAsTags" />
+                                <span>Import content warnings as tags</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportCommunityRating" />
+                                <span>Import Hardcover rating as community rating</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Hardcover's 0–5 average is scaled to Jellyfin's 0–10.</div>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportSeries" />
+                                <span>Import series name and position</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportPublisher" />
+                                <span>Import publisher (as studio)</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="ImportContributors" />
+                                <span>Import authors, illustrators, translators, narrators…</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="IncludeSubtitleInTitle" />
+                                <span>Append subtitle to the title ("Title: Subtitle")</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3 class="sectionTitle">Matching</h3>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="AllowTitleSearchFallback" />
+                                <span>Match by title search when there is no Hardcover id or ISBN</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Books with a Hardcover id (set via Identify) or an ISBN (from an OPF / embedded metadata) are always matched exactly.
+                                Turn this off to only ever use exact matches during scans.
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <input is="emby-input" type="number" id="MinimumMatchScore" label="Minimum title match score (0–100)" min="0" max="100" step="1" />
+                            <div class="fieldDescription">A search hit below this score is ignored instead of guessed. 100 = exact title only, 60 is a sensible default.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3 class="sectionTitle">Authors</h3>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="FetchAuthorMetadata" />
+                                <span>Fetch author biographies and dates</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Only exact name matches are used, since people are shared with movie and TV libraries.</div>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="FetchAuthorImages" />
+                                <span>Offer author photos</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            (function () {
+                var pluginId = '9be8d848-e1ba-4129-89af-3bf0def71e9c';
+                var checkboxes = ['FetchBookCovers', 'ImportGenres', 'ImportMoodsAsTags', 'ImportContentWarningsAsTags',
+                    'ImportCommunityRating', 'ImportSeries', 'ImportPublisher', 'ImportContributors', 'IncludeSubtitleInTitle',
+                    'AllowTitleSearchFallback', 'FetchAuthorMetadata', 'FetchAuthorImages'];
+                var numbers = ['MaxGenres', 'MinimumMatchScore'];
+
+                function el(id) { return document.getElementById(id); }
+
+                function load(page) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        el('ApiToken').value = config.ApiToken || '';
+                        checkboxes.forEach(function (id) { el(id).checked = !!config[id]; });
+                        numbers.forEach(function (id) { el(id).value = (config[id] === undefined || config[id] === null) ? '' : config[id]; });
+                        Dashboard.hideLoadingMsg();
+                    });
+                }
+
+                function setResult(text, ok) {
+                    var span = el('TestResult');
+                    span.textContent = text;
+                    span.style.color = ok ? '#52b54b' : '#ff6b6b';
+                }
+
+                function test() {
+                    setResult('Testing…', true);
+                    var token = el('ApiToken').value.trim();
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('JellyCover/Test'),
+                        data: JSON.stringify({ Token: token }),
+                        contentType: 'application/json',
+                        dataType: 'json'
+                    }).then(function (result) {
+                        var msg = result.Message || (result.Ok ? 'OK' : 'Failed');
+                        if (result.RateLimit) { msg += '  [RateLimit: ' + result.RateLimit + ']'; }
+                        setResult((result.Ok ? '✓ ' : '✗ ') + msg, result.Ok);
+                    }, function (err) {
+                        var status = err && err.status ? ' (HTTP ' + err.status + ')' : '';
+                        setResult('✗ Request failed' + status, false);
+                    });
+                }
+
+                function save(e) {
+                    e.preventDefault();
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        config.ApiToken = el('ApiToken').value.trim();
+                        checkboxes.forEach(function (id) { config[id] = el(id).checked; });
+                        numbers.forEach(function (id) {
+                            var v = parseInt(el(id).value, 10);
+                            config[id] = isNaN(v) ? 0 : v;
+                        });
+                        ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+                    return false;
+                }
+
+                var page = document.querySelector('#JellyCoverConfigPage');
+                page.addEventListener('pageshow', function () { load(page); });
+                document.querySelector('#JellyCoverConfigForm').addEventListener('submit', save);
+                el('TestButton').addEventListener('click', test);
+                el('ShowToken').addEventListener('change', function () {
+                    el('ApiToken').type = this.checked ? 'text' : 'password';
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>

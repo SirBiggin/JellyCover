@@ -1,0 +1,17 @@
+---
+name: "JellyCover"
+guid: "9be8d848-e1ba-4129-89af-3bf0def71e9c"
+version: "1.0.0.0"
+targetAbi: "12.2.0.0"
+framework: "net10.0"
+overview: "Hardcover.app metadata and cover provider for Jellyfin book libraries"
+description: >
+  Fetches book metadata (description, series and position, release date, genres, moods, rating,
+  publisher, ISBN, contributors) and cover images from Hardcover.app, plus author biographies and
+  photos. Requires a free Hardcover API token with the read:catalog scope.
+category: "Metadata"
+owner: "SirBiggin"
+artifacts:
+  - "Jellyfin.Plugin.JellyCover.dll"
+changelog: |-
+  - Initial release
